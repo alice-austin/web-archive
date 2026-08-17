@@ -1,0 +1,78 @@
+{
+  "title": "ECA Vimeo two-click playback",
+  "steps": [
+    {
+      "type": "setViewport",
+      "width": 1905,
+      "height": 1080,
+      "deviceScaleFactor": 1,
+      "isMobile": false,
+      "hasTouch": false,
+      "isLandscape": false
+    },
+    {
+      "type": "navigate",
+      "url": "https://www.2021.graduateshow.eca.ed.ac.uk/portfolio/anne-catherine-leblanc"
+    },
+    {
+      "type": "waitForElement",
+      "target": "main",
+      "selectors": [
+        [
+          "section:nth-of-type(3) div.video-image-container > div > img"
+        ]
+      ],
+      "timeout": 30000
+    },
+    {
+      "type": "click",
+      "target": "main",
+      "selectors": [
+        [
+          "section:nth-of-type(3) div.video-image-container > div > img"
+        ],
+        [
+          "xpath///*[@id=\"block-gs-content\"]/div[2]/section[3]/div/div/div/div[1]/div/img"
+        ]
+      ],
+      "offsetY": 51.765625,
+      "offsetX": 40.5
+    },
+    {
+      "type": "waitForElement",
+      "target": "https://player.vimeo.com/video/440086135?app_id=122963",
+      "selectors": [
+        [
+          "aria/Play",
+          "aria/[role=\"image\"]"
+        ],
+        [
+          "div.PlayButton_module_playButtonWrapper__d6312f47 svg"
+        ]
+      ],
+      "timeout": 30000
+    },
+    {
+      "type": "click",
+      "target": "https://player.vimeo.com/video/440086135?app_id=122963",
+      "selectors": [
+        [
+          "aria/Play",
+          "aria/[role=\"image\"]"
+        ],
+        [
+          "div.PlayButton_module_playButtonWrapper__d6312f47 svg"
+        ],
+        [
+          "xpath///*[@id=\"player\"]/div[5]/div[6]/div[1]/div[1]/button/svg"
+        ]
+      ],
+      "offsetY": 4.625,
+      "offsetX": 21
+    },
+    {
+      "type": "wait",
+      "duration": 60000
+    }
+  ]
+}
