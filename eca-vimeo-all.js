@@ -3,30 +3,44 @@ class ECAVimeoAll {
 
   static isMatch() {
     const host = window.location.hostname;
+    const path = window.location.pathname;
 
-    return (
+    /*
+     * Only run on actual ECA portfolio pages at the top level,
+     * or inside actual Vimeo player frames.
+     *
+     * IMPORTANT:
+     * Do NOT match /media/oembed here. Those are intermediate
+     * ECA frames and are handled by the parent page.
+     */
+    if (
       host === "www.2021.graduateshow.eca.ed.ac.uk" ||
-      host === "2021.graduateshow.eca.ed.ac.uk" ||
-      host === "player.vimeo.com" ||
-      host === "vimeo.com"
-    );
+      host === "2021.graduateshow.eca.ed.ac.uk"
+    ) {
+      return path.startsWith("/portfolio/");
+    }
+
+    if (host === "player.vimeo.com") {
+      return true;
+    }
+
+    return false;
   }
 
   static init() {
     return {};
   }
 
-  /*
-   * Run in the top-level ECA page AND inside Vimeo iframes.
-   */
   static runInIframe = true;
 
   async* run(ctx) {
     const { Lib } = ctx;
 
-    const sleep = Lib.sleep || (
-      ms => new Promise(resolve => setTimeout(resolve, ms))
-    );
+    const sleep =
+      Lib && Lib.sleep
+        ? Lib.sleep
+        : (ms) =>
+            new Promise((resolve) => setTimeout(resolve, ms));
 
     const log = (msg) => {
       ctx.log({
@@ -36,55 +50,25 @@ class ECAVimeoAll {
 
     /*
      * ============================================================
-     * VIMEO FRAME
+     * VIMEO PLAYER
      * ============================================================
      *
-     * This section runs inside player.vimeo.com.
-     *
-     * We deliberately support several versions/states of the
-     * Vimeo player because the two Recorder recordings showed
-     * different player controls.
+     * This executes inside player.vimeo.com.
      */
 
     if (
-      window.location.hostname === "player.vimeo.com" ||
-      window.location.hostname === "vimeo.com"
+      window.location.hostname === "player.vimeo.com"
     ) {
-      log("Entered Vimeo iframe");
+      log("Entered Vimeo player iframe");
 
-      const getVideo = () => document.querySelector("video");
-
-      const getPlayControls = () => {
-        const selectors = [
-          'button[aria-label="Play"]',
-          'button[aria-label*="Play" i]',
-          '[role="button"][aria-label*="Play" i]',
-          '[aria-label="Play"]',
-          '.PlayButton_module_playButtonWrapper__d6312f47',
-          '.vp-target',
-          '.vp-play-button',
-          '.play-button'
-        ];
-
-        const result = [];
-
-        for (const selector of selectors) {
-          for (const el of document.querySelectorAll(selector)) {
-            const rect = el.getBoundingClientRect();
-
-            if (
-              rect.width > 0 &&
-              rect.height > 0
-            ) {
-              result.push(el);
-            }
-          }
-        }
-
-        return result;
-      };
+      const getVideo = () =>
+        document.querySelector("video");
 
       const clickElement = (el) => {
+        if (!el) {
+          return false;
+        }
+
         try {
           el.scrollIntoView({
             block: "center",
@@ -97,70 +81,60 @@ class ECAVimeoAll {
           return true;
         } catch (_) {}
 
-        try {
-          const rect = el.getBoundingClientRect();
-
-          const options = {
-            bubbles: true,
-            cancelable: true,
-            view: window,
-            clientX: rect.left + rect.width / 2,
-            clientY: rect.top + rect.height / 2
-          };
-
-          el.dispatchEvent(new PointerEvent(
-            "pointerdown",
-            options
-          ));
-
-          el.dispatchEvent(new MouseEvent(
-            "mousedown",
-            options
-          ));
-
-          el.dispatchEvent(new PointerEvent(
-            "pointerup",
-            options
-          ));
-
-          el.dispatchEvent(new MouseEvent(
-            "mouseup",
-            options
-          ));
-
-          el.dispatchEvent(new MouseEvent(
-            "click",
-            options
-          ));
-
-          return true;
-        } catch (_) {}
-
         return false;
       };
 
+      const findPlayControls = () => {
+        const selectors = [
+          'button[aria-label="Play"]',
+          'button[aria-label*="Play" i]',
+          '[role="button"][aria-label*="Play" i]',
+          '[aria-label="Play"]',
+          ".vp-play-button",
+          ".PlayButton_module_playButtonWrapper__d6312f47",
+          ".vp-target"
+        ];
+
+        const found = [];
+
+        for (const selector of selectors) {
+          for (const el of document.querySelectorAll(selector)) {
+            const rect =
+              el.getBoundingClientRect();
+
+            if (
+              rect.width > 0 &&
+              rect.height > 0 &&
+              !found.includes(el)
+            ) {
+              found.push(el);
+            }
+          }
+        }
+
+        return found;
+      };
+
       /*
-       * Wait for the actual HTML5 video element.
+       * Wait for Vimeo's HTML5 video.
        */
       let video = null;
 
-      for (let i = 0; i < 30; i++) {
+      for (let i = 0; i < 60; i++) {
         video = getVideo();
 
         if (video) {
-          log("Found Vimeo HTML5 video element");
+          log(
+            `Found HTML5 video: readyState=${video.readyState}`
+          );
           break;
         }
 
-        await sleep(1000);
+        await sleep(500);
       }
 
       if (!video) {
-        log("No Vimeo video element found");
-
-        yield {
-          msg: "No Vimeo video element found"
-        };
+        log("ERROR: no HTML5 video found");
 
         return;
       }
@@ -171,75 +145,71 @@ class ECAVimeoAll {
        * ========================================================
        */
 
-      let started = false;
-
       for (let attempt = 0; attempt < 10; attempt++) {
         video = getVideo();
 
         if (!video) {
-          await sleep(1000);
+          await sleep(500);
           continue;
         }
 
         log(
-          `Initial video state: ` +
+          `Initial state: ` +
           `time=${video.currentTime.toFixed(2)} ` +
           `paused=${video.paused} ` +
+          `ended=${video.ended} ` +
           `readyState=${video.readyState}`
         );
 
-        /*
-         * First try the actual HTML5 video API.
-         *
-         * This is especially useful after the real click has
-         * already established Vimeo's user interaction state.
-         */
-        if (video.paused && !video.ended) {
-          try {
-            await video.play();
-
-            started = true;
-
-            log("video.play() succeeded");
-          } catch (err) {
-            log(
-              `video.play() rejected: ${err.message || err}`
-            );
-          }
+        if (!video.paused) {
+          log("Vimeo is already playing");
+          break;
         }
 
         /*
-         * If that didn't work, use Vimeo's visible controls.
-         *
-         * Recorder showed both:
-         *
-         *   aria/Play
-         *
-         * and:
-         *
-         *   div.vp-target
+         * First try the actual video element.
          */
-        if (video.paused && !video.ended) {
-          const controls = getPlayControls();
+        try {
+          await video.play();
 
-          for (const control of controls) {
-            if (clickElement(control)) {
-              log(
-                `Clicked Vimeo control: ${control.className || control.tagName}`
-              );
-
-              await sleep(1000);
-
-              if (!video.paused) {
-                started = true;
-                break;
-              }
-            }
-          }
+          log("video.play() succeeded");
+        } catch (err) {
+          log(
+            `video.play() rejected: ${
+              err.message || err
+            }`
+          );
         }
 
         if (!video.paused) {
-          started = true;
+          break;
+        }
+
+        /*
+         * Then try visible Vimeo controls.
+         */
+        const controls = findPlayControls();
+
+        for (const control of controls) {
+          log(
+            `Trying Vimeo control: ${
+              control.className || control.tagName
+            }`
+          );
+
+          clickElement(control);
+
+          await sleep(500);
+
+          video = getVideo();
+
+          if (video && !video.paused) {
+            log("Vimeo started playing");
+            break;
+          }
+        }
+
+        if (video && !video.paused) {
           break;
         }
 
@@ -247,57 +217,34 @@ class ECAVimeoAll {
       }
 
       /*
-       * Give Vimeo a little time to begin requesting media.
-       */
-      await sleep(3000);
-
-      /*
        * ========================================================
-       * PLAYBACK MONITOR
+       * MONITOR PLAYBACK
        * ========================================================
        *
-       * Rather than waiting an arbitrary 60/120 seconds, monitor
-       * the actual video.
-       *
-       * This means a 30-second video can finish normally while a
-       * 4-minute video gets the time it needs.
+       * Up to 15 minutes.
        */
 
       let lastTime = video.currentTime;
-      let stalledFor = 0;
+      let stalledSeconds = 0;
 
-      /*
-       * Maximum safety limit: 15 minutes per Vimeo video.
-       */
-      const maxChecks = 180;
-
-      for (let i = 0; i < maxChecks; i++) {
+      for (let i = 0; i < 180; i++) {
         await sleep(5000);
 
         video = getVideo();
 
         if (!video) {
-          log("Vimeo video element disappeared");
-
-          /*
-           * Vimeo occasionally recreates its <video> element.
-           * Wait for the replacement.
-           */
-          for (let j = 0; j < 10; j++) {
-            await sleep(1000);
-
-            video = getVideo();
-
-            if (video) {
-              log("Vimeo video element recreated");
-              break;
-            }
-          }
-
+          log("Video element disappeared");
           continue;
         }
 
-        const currentTime = video.currentTime;
+        const currentTime =
+          video.currentTime;
+
+        const duration =
+          Number.isFinite(video.duration)
+            ? video.duration
+            : null;
+
         const paused = video.paused;
         const ended = video.ended;
 
@@ -305,8 +252,8 @@ class ECAVimeoAll {
           `video state: ` +
           `time=${currentTime.toFixed(2)} ` +
           `duration=${
-            Number.isFinite(video.duration)
-              ? video.duration.toFixed(2)
+            duration !== null
+              ? duration.toFixed(2)
               : "unknown"
           } ` +
           `paused=${paused} ` +
@@ -314,16 +261,8 @@ class ECAVimeoAll {
           `readyState=${video.readyState}`
         );
 
-        /*
-         * Normal completion.
-         */
         if (ended) {
           log("Vimeo video finished");
-
-          yield {
-            msg: "Vimeo video finished"
-          };
-
           return;
         }
 
@@ -331,99 +270,52 @@ class ECAVimeoAll {
          * Detect progress.
          */
         if (currentTime > lastTime + 0.2) {
-          stalledFor = 0;
+          stalledSeconds = 0;
         } else {
-          stalledFor += 5;
+          stalledSeconds += 5;
         }
 
         lastTime = currentTime;
 
         /*
-         * ======================================================
-         * RESUME PAUSED PLAYBACK
-         * ======================================================
+         * If Vimeo has paused, resume it.
          */
-
-        if (paused) {
-          log("Vimeo playback is paused — attempting resume");
-
-          let resumed = false;
+        if (paused && !ended) {
+          log(
+            "Vimeo paused — attempting resume"
+          );
 
           try {
             await video.play();
+          } catch (_) {}
 
-            resumed = true;
+          await sleep(500);
 
-            log("video.play() successfully resumed playback");
-          } catch (err) {
-            log(
-              `video.play() rejected while resuming: ${
-                err.message || err
-              }`
-            );
-          }
-
-          /*
-           * If video.play() was rejected, try the visible player
-           * control.
-           */
-          if (!resumed || video.paused) {
-            const controls = getPlayControls();
+          if (video.paused) {
+            const controls =
+              findPlayControls();
 
             for (const control of controls) {
-              if (clickElement(control)) {
-                log("Clicked Vimeo playback control");
+              clickElement(control);
 
-                await sleep(1000);
+              await sleep(500);
 
-                if (!video.paused) {
-                  resumed = true;
-                  break;
-                }
+              if (!video.paused) {
+                break;
               }
-            }
-          }
-
-          /*
-           * Last resort: click the main Vimeo player target.
-           *
-           * This corresponds to the Gisela Recorder recording,
-           * which recorded:
-           *
-           *   div.vp-target
-           */
-          if (!resumed || video.paused) {
-            const target = document.querySelector(
-              "div.vp-target"
-            );
-
-            if (target) {
-              clickElement(target);
-
-              await sleep(1000);
-
-              try {
-                await video.play();
-              } catch (_) {}
             }
           }
         }
 
         /*
-         * ======================================================
-         * STALL RECOVERY
-         * ======================================================
-         *
-         * If currentTime hasn't advanced for 10 seconds, attempt
-         * playback again.
+         * Recover from a genuine stall.
          */
-
         if (
-          stalledFor >= 10 &&
+          stalledSeconds >= 10 &&
           !ended
         ) {
           log(
-            "Vimeo playback appears stalled — attempting recovery"
+            "Playback stalled — attempting recovery"
           );
 
           try {
@@ -431,7 +323,8 @@ class ECAVimeoAll {
           } catch (_) {}
 
           if (video.paused) {
-            const controls = getPlayControls();
+            const controls =
+              findPlayControls();
 
             for (const control of controls) {
               clickElement(control);
@@ -444,18 +337,17 @@ class ECAVimeoAll {
             }
           }
 
-          stalledFor = 0;
+          stalledSeconds = 0;
         }
 
         yield {
           msg:
-            `Vimeo playback: ${currentTime.toFixed(1)}s`
+            `Vimeo playback ${currentTime.toFixed(1)}s`
         };
       }
 
       log(
-        `Reached maximum Vimeo playback monitor time; ` +
-        `started=${started}`
+        "Reached 15-minute Vimeo safety limit"
       );
 
       return;
@@ -465,8 +357,6 @@ class ECAVimeoAll {
      * ============================================================
      * ECA PORTFOLIO PAGE
      * ============================================================
-     *
-     * This part runs in the top-level ECA page.
      */
 
     log(
@@ -474,96 +364,95 @@ class ECAVimeoAll {
     );
 
     /*
-     * Find likely video thumbnails.
+     * Find video thumbnails.
      *
-     * We deliberately DON'T use section:nth-of-type(), because
-     * the two recordings showed section 3 and section 6.
+     * We deliberately avoid section numbers because the
+     * recordings showed section 3 and section 6.
      */
 
-    const videoSelectors = [
+    const selectors = [
       ".video-image-container img",
-
-      /*
-       * Generic video/image containers.
-       */
       "[class*='video-image'] img",
-      "[class*='video'] img",
-      "[class*='vimeo'] img",
-
-      /*
-       * Common clickable image/video wrappers.
-       */
       "[data-vimeo] img",
       "[data-vimeo-id] img",
       "[data-video] img",
       "[data-video-id] img"
     ];
 
-    function getVideoThumbnails() {
-      const found = [];
+    const thumbnails = [];
 
-      for (const selector of videoSelectors) {
-        for (const el of document.querySelectorAll(selector)) {
-          if (!found.includes(el)) {
-            found.push(el);
-          }
+    for (const selector of selectors) {
+      for (
+        const el of document.querySelectorAll(selector)
+      ) {
+        const rect =
+          el.getBoundingClientRect();
+
+        if (
+          rect.width >= 100 &&
+          rect.height >= 50 &&
+          !thumbnails.includes(el)
+        ) {
+          thumbnails.push(el);
         }
       }
-
-      /*
-       * Filter out tiny/invisible images.
-       */
-      return found.filter(el => {
-        const rect = el.getBoundingClientRect();
-
-        return (
-          rect.width >= 100 &&
-          rect.height >= 50
-        );
-      });
     }
-
-    /*
-     * Some ECA pages may have several video thumbnails.
-     *
-     * We process them one at a time.
-     */
-    const thumbnails = getVideoThumbnails();
 
     log(
       `Found ${thumbnails.length} possible video thumbnail(s)`
     );
 
     if (!thumbnails.length) {
-      yield {
-        msg: "No video thumbnails found"
-      };
-
       return;
     }
 
     /*
-     * Track Vimeo iframes we've already activated.
+     * ========================================================
+     * PROCESS EACH VIDEO
+     * ========================================================
      */
-    const processedFrames = new Set();
 
     for (
-      let thumbnailIndex = 0;
-      thumbnailIndex < thumbnails.length;
-      thumbnailIndex++
+      let index = 0;
+      index < thumbnails.length;
+      index++
     ) {
-      const thumbnail = thumbnails[thumbnailIndex];
+      const thumbnail = thumbnails[index];
 
       log(
-        `Processing video ${thumbnailIndex + 1}/${thumbnails.length}`
+        `Processing video ${index + 1}/${thumbnails.length}`
       );
 
       /*
-       * Scroll the thumbnail into view.
+       * Record the player.vimeo.com frames that exist before
+       * opening this video.
+       */
+      const existingPlayerFrames =
+        new Set(
+          Array.from(
+            document.querySelectorAll(
+              'iframe[src*="player.vimeo.com"]'
+            )
+          )
+        );
+
+      /*
+       * Record ECA oEmbed frames too.
+       */
+      const existingOembedFrames =
+        new Set(
+          Array.from(
+            document.querySelectorAll(
+              'iframe[src*="/media/oembed"]'
+            )
+          )
+        );
+
+      /*
+       * Scroll thumbnail into view.
        */
       try {
         thumbnail.scrollIntoView({
-          behavior: "instant",
           block: "center",
           inline: "center"
         });
@@ -572,39 +461,22 @@ class ECAVimeoAll {
       await sleep(500);
 
       /*
-       * Record the Vimeo frames that already exist.
-       */
-      const beforeFrames = new Set(
-        Array.from(
-          document.querySelectorAll(
-            'iframe[src*="vimeo.com"]'
-          )
-        )
-      );
-
-      /*
-       * ========================================================
-       * FIRST CLICK
-       * ========================================================
-       *
-       * This corresponds to BOTH Recorder recordings:
-       *
-       * Anne-Catherine:
-       *   section:nth-of-type(3) ... img
-       *
-       * Gisela:
-       *   section:nth-of-type(6) ... img
-       *
-       * The stable part is the video image/container.
+       * ======================================================
+       * CLICK 1 — ECA VIDEO THUMBNAIL
+       * ======================================================
        */
 
       try {
         thumbnail.click();
 
-        log("Clicked ECA video thumbnail");
+        log(
+          "Clicked ECA video thumbnail"
+        );
       } catch (err) {
         log(
-          `Thumbnail click failed: ${err.message || err}`
+          `Thumbnail click failed: ${
+            err.message || err
+          }`
         );
 
         continue;
@@ -612,142 +484,254 @@ class ECAVimeoAll {
 
       yield {
         msg:
-          `Clicked video thumbnail ${thumbnailIndex + 1}/${thumbnails.length}`
+          `Clicked video ${index + 1}/${thumbnails.length}`
       };
 
       /*
-       * ========================================================
-       * WAIT FOR THE EMBED
-       * ========================================================
+       * ======================================================
+       * WAIT FOR ECA OEmbed OR DIRECT VIMEO
+       * ======================================================
        */
 
-      let vimeoFrame = null;
+      let oembedFrame = null;
+      let playerFrame = null;
 
       for (let attempt = 0; attempt < 30; attempt++) {
-        const frames = Array.from(
-          document.querySelectorAll(
-            'iframe[src*="player.vimeo.com"], iframe[src*="vimeo.com"]'
-          )
-        );
-
         /*
-         * Prefer a newly created Vimeo iframe.
+         * First look for a NEW direct Vimeo player.
          */
-        vimeoFrame =
-          frames.find(frame => !beforeFrames.has(frame)) ||
-          frames.find(frame => !processedFrames.has(frame)) ||
-          null;
+        const players =
+          Array.from(
+            document.querySelectorAll(
+              'iframe[src*="player.vimeo.com"]'
+            )
+          );
 
-        if (vimeoFrame) {
+        playerFrame =
+          players.find(
+            (frame) =>
+              !existingPlayerFrames.has(frame)
+          ) || null;
+
+        if (playerFrame) {
+          log(
+            `Found direct Vimeo player: ${playerFrame.src}`
+          );
+
           break;
         }
 
-        await sleep(1000);
+        /*
+         * Otherwise look for the ECA oEmbed iframe.
+         */
+        const oembeds =
+          Array.from(
+            document.querySelectorAll(
+              'iframe[src*="/media/oembed"]'
+            )
+          );
+
+        oembedFrame =
+          oembeds.find(
+            (frame) =>
+              !existingOembedFrames.has(frame)
+          ) || null;
+
+        if (oembedFrame) {
+          log(
+            `Found ECA oEmbed iframe: ${oembedFrame.src}`
+          );
+
+          break;
+        }
+
+        await sleep(500);
       }
 
-      if (!vimeoFrame) {
-        log(
-          "No new Vimeo iframe appeared after thumbnail click"
-        );
+      /*
+       * ======================================================
+       * DIRECT VIMEO CASE
+       * ======================================================
+       */
+
+      if (playerFrame) {
+        try {
+          playerFrame.scrollIntoView({
+            block: "center",
+            inline: "center"
+          });
+        } catch (_) {}
+
+        await sleep(500);
+
+        try {
+          playerFrame.click();
+
+          log(
+            "Clicked direct Vimeo iframe"
+          );
+        } catch (_) {}
+
+        await sleep(2000);
 
         continue;
       }
 
-      processedFrames.add(vimeoFrame);
-
-      log(
-        `Found Vimeo iframe: ${vimeoFrame.src}`
-      );
-
       /*
-       * ========================================================
-       * INTERMEDIATE IFRAME CLICK
-       * ========================================================
-       *
-       * Gisela's Recorder recording showed an additional click
-       * on an iframe before the Vimeo player interaction.
-       *
-       * We reproduce that here, but only when appropriate.
+       * ======================================================
+       * ECA OEmbed CASE
+       * ======================================================
        */
 
-      try {
-        vimeoFrame.scrollIntoView({
-          block: "center",
-          inline: "center"
-        });
-      } catch (_) {}
+      if (oembedFrame) {
+        try {
+          oembedFrame.scrollIntoView({
+            block: "center",
+            inline: "center"
+          });
+        } catch (_) {}
 
-      await sleep(1000);
+        await sleep(500);
 
-      try {
-        vimeoFrame.click();
-
-        log("Clicked Vimeo iframe/container");
-      } catch (_) {
         /*
-         * iframe.click() isn't guaranteed to generate a pointer
-         * event in every browser state. That's okay — the
-         * Vimeo iframe behavior will handle the actual player.
+         * This corresponds to the Gisela Recorder's
+         * intermediate iframe click.
          */
+        try {
+          oembedFrame.click();
+
+          log(
+            "Clicked ECA oEmbed iframe"
+          );
+        } catch (_) {
+          log(
+            "Could not directly click oEmbed iframe"
+          );
+        }
+
+        /*
+         * Now wait for the REAL Vimeo player to appear.
+         */
+        for (
+          let attempt = 0;
+          attempt < 30;
+          attempt++
+        ) {
+          const players =
+            Array.from(
+              document.querySelectorAll(
+                'iframe[src*="player.vimeo.com"]'
+              )
+            );
+
+          playerFrame =
+            players.find(
+              (frame) =>
+                !existingPlayerFrames.has(frame)
+            ) || null;
+
+          if (playerFrame) {
+            log(
+              `Found nested Vimeo player: ${playerFrame.src}`
+            );
+
+            break;
+          }
+
+          /*
+           * Also check inside the oEmbed iframe.
+           *
+           * This is useful if the browser exposes the
+           * frame's DOM to the parent.
+           */
+          try {
+            if (
+              oembedFrame.contentDocument
+            ) {
+              playerFrame =
+                oembedFrame.contentDocument.querySelector(
+                  'iframe[src*="player.vimeo.com"]'
+                );
+
+              if (playerFrame) {
+                log(
+                  `Found Vimeo player inside oEmbed iframe: ${
+                    playerFrame.src
+                  }`
+                );
+
+                break;
+              }
+            }
+          } catch (_) {
+            /*
+             * Cross-origin access is expected to fail here.
+             */
+          }
+
+          await sleep(500);
+        }
       }
 
-      yield {
-        msg:
-          `Activated Vimeo iframe ${thumbnailIndex + 1}`
-      };
-
       /*
-       * Give the iframe time to initialise.
+       * ======================================================
+       * RESULT
+       * ======================================================
        */
-      await sleep(3000);
 
-      /*
-       * Send a play request from the parent as an additional
-       * mechanism. The actual player-side behavior will also
-       * click/play the HTML5 video.
-       */
-      try {
-        vimeoFrame.contentWindow.postMessage(
-          JSON.stringify({
-            method: "play"
-          }),
-          "*"
+      if (playerFrame) {
+        log(
+          `Activating Vimeo player ${index + 1}`
         );
 
-        log("Sent Vimeo play request");
-      } catch (_) {}
+        try {
+          playerFrame.scrollIntoView({
+            block: "center",
+            inline: "center"
+          });
+        } catch (_) {}
+
+        await sleep(500);
+
+        try {
+          playerFrame.click();
+
+          log(
+            "Clicked Vimeo player iframe"
+          );
+        } catch (_) {}
+
+        /*
+         * Give the iframe behavior time to initialise.
+         */
+        await sleep(3000);
+
+        yield {
+          msg:
+            `Activated Vimeo video ${index + 1}/${thumbnails.length}`
+        };
+      } else {
+        log(
+          `WARNING: could not find player.vimeo.com iframe for video ${
+            index + 1
+          }`
+        );
+      }
 
       /*
-       * Don't immediately process the next thumbnail.
-       *
-       * The Vimeo iframe behavior is running independently and
-       * will monitor this player's actual playback until it
-       * finishes.
-       */
-      yield {
-        msg:
-          `Started Vimeo processing ${thumbnailIndex + 1}/${thumbnails.length}`
-      };
-
-      /*
-       * Give the iframe behavior time to start before moving on.
+       * Give the current video a chance to start before
+       * opening another one.
        */
       await sleep(5000);
     }
 
-    /*
-     * ============================================================
-     * FINISH
-     * ============================================================
-     */
-
     log(
-      `Finished processing ${thumbnails.length} video thumbnail(s)`
+      `Finished processing ${thumbnails.length} video(s)`
     );
 
     yield {
       msg:
-        `Processed ${thumbnails.length} ECA video thumbnail(s)`
+        `Processed ${thumbnails.length} ECA video(s)`
     };
   }
 }
