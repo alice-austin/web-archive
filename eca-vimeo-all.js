@@ -1,11 +1,11 @@
-class ECAVimeoAll {
-  static id = "ECA Graduate Show Vimeo";
+class ECAVimeoArchive {
+  static id = "ECA Vimeo Archive";
 
   static isMatch() {
     const host = window.location.hostname;
     const path = window.location.pathname;
 
-    // Top-level ECA portfolio pages only.
+    // ECA portfolio pages
     if (
       host === "www.2021.graduateshow.eca.ed.ac.uk" ||
       host === "2021.graduateshow.eca.ed.ac.uk"
@@ -13,7 +13,7 @@ class ECAVimeoAll {
       return path.startsWith("/portfolio/");
     }
 
-    // Run inside Vimeo players.
+    // Vimeo iframe
     if (host === "player.vimeo.com") {
       return true;
     }
@@ -25,6 +25,9 @@ class ECAVimeoAll {
     return {};
   }
 
+  /*
+   * Browsertrix will run this behaviour in Vimeo child frames too.
+   */
   static runInIframe = true;
 
   async* run(ctx) {
@@ -33,297 +36,502 @@ class ECAVimeoAll {
     const sleep =
       Lib && Lib.sleep
         ? Lib.sleep
-        : (ms) =>
-            new Promise((resolve) =>
-              setTimeout(resolve, ms)
-            );
+        : (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
     const log = (msg) => {
-      ctx.log({
-        msg: `[ECA Vimeo] ${msg}`
-      });
+      try {
+        ctx.log({
+          msg: `[ECA Vimeo] ${msg}`
+        });
+      } catch (_) {
+        console.log(`[ECA Vimeo] ${msg}`);
+      }
     };
 
     /*
      * ============================================================
-     * VIMEO PLAYER
+     * VIMEO IFRAME
      * ============================================================
      */
 
-    if (
-      window.location.hostname === "player.vimeo.com"
-    ) {
-      log("Entered Vimeo player iframe");
+    if (window.location.hostname === "player.vimeo.com") {
+      log(`Entered Vimeo iframe: ${location.href}`);
 
-      const getVideo = () =>
-        document.querySelector("video");
+      const MAX_RUNTIME = 30 * 60 * 1000;
+      const STALL_LIMIT = 20;
 
-      const getPlayButtons = () => {
-        const selectors = [
-          'button[aria-label="Play"]',
-          'button[aria-label*="Play" i]',
-          '[role="button"][aria-label*="Play" i]',
-          '[aria-label="Play"]',
-          ".vp-play-button",
-          ".PlayButton_module_playButtonWrapper__d6312f47"
-        ];
+      /*
+       * ------------------------------------------------------------
+       * Find the Vimeo video ID
+       * ------------------------------------------------------------
+       */
 
-        const results = [];
+      function getVideoId() {
+        const match =
+          location.pathname.match(/\/video\/(\d+)/);
 
-        for (const selector of selectors) {
-          for (
-            const el of document.querySelectorAll(selector)
-          ) {
-            const rect =
-              el.getBoundingClientRect();
-
-            if (
-              rect.width > 0 &&
-              rect.height > 0 &&
-              !results.includes(el)
-            ) {
-              results.push(el);
-            }
-          }
+        if (match) {
+          return match[1];
         }
 
-        return results;
-      };
+        const params =
+          new URLSearchParams(location.search);
 
-      const clickElement = (el) => {
-        if (!el) {
-          return false;
+        return (
+          params.get("clip_id") ||
+          params.get("video_id") ||
+          params.get("id")
+        );
+      }
+
+      /*
+       * ------------------------------------------------------------
+       * Find HTML5 video
+       * ------------------------------------------------------------
+       */
+
+      function getVideo() {
+        return document.querySelector("video");
+      }
+
+      /*
+       * ------------------------------------------------------------
+       * Fetch Vimeo's player configuration
+       *
+       * Vimeo exposes the actual available renditions here.
+       * We are particularly interested in:
+       *
+       *     request.files.progressive[]
+       *
+       * because those are ordinary MP4 resources.
+       * ------------------------------------------------------------
+       */
+
+      async function getVimeoConfig(videoId) {
+        if (!videoId) {
+          log("Could not determine Vimeo video ID");
+          return null;
         }
+
+        const url =
+          `https://player.vimeo.com/video/${videoId}/config`;
+
+        log(`Requesting Vimeo config: ${url}`);
 
         try {
-          el.scrollIntoView({
-            block: "center",
-            inline: "center"
+          const response = await fetch(url, {
+            credentials: "include",
+            cache: "no-store"
           });
-        } catch (_) {}
 
-        try {
-          el.click();
-          return true;
-        } catch (_) {}
+          if (!response.ok) {
+            log(
+              `Vimeo config returned HTTP ${response.status}`
+            );
 
-        return false;
-      };
+            return null;
+          }
 
-      /*
-       * ----------------------------------------------------------
-       * WAIT FOR VIDEO ELEMENT
-       * ----------------------------------------------------------
-       */
+          return await response.json();
 
-      let video = null;
-
-      for (let i = 0; i < 60; i++) {
-        video = getVideo();
-
-        if (video) {
+        } catch (err) {
           log(
-            `Found HTML5 video: ` +
-            `readyState=${video.readyState}`
+            `Vimeo config request failed: ${
+              err && err.message ? err.message : err
+            }`
           );
 
-          break;
+          return null;
         }
-
-        await sleep(500);
-      }
-
-      if (!video) {
-        log("ERROR: no HTML5 video found");
-        return;
       }
 
       /*
-       * ----------------------------------------------------------
-       * WAIT FOR MEDIA TO LOAD
-       * ----------------------------------------------------------
-       *
-       * readyState 0 means HAVE_NOTHING.
-       *
-       * We previously tried to play immediately at this point.
-       * Instead, wait for Vimeo to initialise the media.
+       * ------------------------------------------------------------
+       * Extract progressive MP4 URLs
+       * ------------------------------------------------------------
        */
 
-      for (let i = 0; i < 60; i++) {
-        video = getVideo();
+      function getProgressiveFiles(config) {
+        const progressive =
+          config &&
+          config.request &&
+          config.request.files &&
+          config.request.files.progressive;
 
-        if (!video) {
+        if (!Array.isArray(progressive)) {
+          return [];
+        }
+
+        return progressive
+          .filter(file => {
+            return (
+              file &&
+              typeof file.url === "string" &&
+              /^https?:\/\//i.test(file.url)
+            );
+          })
+          .sort((a, b) => {
+            return (
+              (Number(b.height) || 0) -
+              (Number(a.height) || 0)
+            );
+          });
+      }
+
+      /*
+       * ------------------------------------------------------------
+       * Select an MP4
+       *
+       * Prefer 1080p or below. This avoids accidentally selecting
+       * an enormous 2K/4K resource when the archive doesn't need it.
+       * ------------------------------------------------------------
+       */
+
+      function selectProgressive(files) {
+        if (!files.length) {
+          return null;
+        }
+
+        return (
+          files.find(file =>
+            (Number(file.height) || 0) <= 1080
+          ) ||
+          files[0]
+        );
+      }
+
+      /*
+       * ------------------------------------------------------------
+       * Wait for the Vimeo video element
+       * ------------------------------------------------------------
+       */
+
+      async function waitForVideo(timeout = 60000) {
+        const start = Date.now();
+
+        while (Date.now() - start < timeout) {
+          const video = getVideo();
+
+          if (video) {
+            return video;
+          }
+
           await sleep(500);
-          continue;
+        }
+
+        return null;
+      }
+
+      /*
+       * ------------------------------------------------------------
+       * Install progressive MP4
+       * ------------------------------------------------------------
+       */
+
+      async function installProgressiveSource() {
+        const videoId = getVideoId();
+
+        if (!videoId) {
+          return null;
+        }
+
+        log(`Vimeo video ID: ${videoId}`);
+
+        const config =
+          await getVimeoConfig(videoId);
+
+        if (!config) {
+          return null;
+        }
+
+        const files =
+          getProgressiveFiles(config);
+
+        if (!files.length) {
+          log(
+            "No progressive MP4 files exposed by Vimeo"
+          );
+
+          return null;
         }
 
         log(
-          `Waiting for video readiness: ` +
-          `readyState=${video.readyState} ` +
-          `networkState=${video.networkState}`
+          `Found ${files.length} progressive MP4 rendition(s)`
         );
 
-        if (video.readyState >= 2) {
+        for (const file of files) {
           log(
-            `Video is ready: readyState=${video.readyState}`
+            `MP4: ${file.width || "?"}x${file.height || "?"} ` +
+            `${file.url}`
           );
-
-          break;
         }
 
-        await sleep(500);
-      }
-
-      /*
-       * ----------------------------------------------------------
-       * START PLAYBACK
-       * ----------------------------------------------------------
-       */
-
-      let playing = false;
-
-      for (let attempt = 0; attempt < 15; attempt++) {
-        video = getVideo();
-
-        if (!video) {
-          await sleep(500);
-          continue;
-        }
+        const selected =
+          selectProgressive(files);
 
         log(
-          `Play attempt ${attempt + 1}: ` +
-          `time=${video.currentTime.toFixed(2)} ` +
-          `paused=${video.paused} ` +
-          `ended=${video.ended} ` +
-          `readyState=${video.readyState}`
+          `Selected MP4: ` +
+          `${selected.width || "?"}x${selected.height || "?"}`
         );
 
-        if (!video.paused) {
-          playing = true;
-          break;
+        let video =
+          await waitForVideo();
+
+        if (!video) {
+          log(
+            "Vimeo <video> element never appeared"
+          );
+
+          return null;
         }
 
         /*
-         * Try HTML5 play().
+         * Important:
+         *
+         * Remove Vimeo's existing MediaSource-backed source before
+         * installing the ordinary MP4 URL.
          */
+
+        try {
+          video.pause();
+
+          video.removeAttribute("src");
+
+          while (video.firstChild) {
+            video.removeChild(
+              video.firstChild
+            );
+          }
+
+        } catch (_) {}
+
+        /*
+         * Force the progressive MP4.
+         */
+
+        try {
+          video.preload = "auto";
+          video.muted = true;
+          video.setAttribute(
+            "playsinline",
+            ""
+          );
+
+          video.src = selected.url;
+
+          video.load();
+
+          log(
+            "Installed progressive MP4 source"
+          );
+
+        } catch (err) {
+          log(
+            `Could not install MP4: ${
+              err && err.message
+                ? err.message
+                : err
+            }`
+          );
+
+          return null;
+        }
+
+        /*
+         * Wait for the MP4 to become readable.
+         */
+
+        const start =
+          Date.now();
+
+        while (
+          Date.now() - start <
+          60000
+        ) {
+          video = getVideo();
+
+          if (!video) {
+            await sleep(500);
+            continue;
+          }
+
+          if (
+            video.readyState >= 2 &&
+            Number.isFinite(video.duration)
+          ) {
+            log(
+              `MP4 ready: duration=${video.duration.toFixed(2)}s`
+            );
+
+            return {
+              video,
+              url: selected.url,
+              duration: video.duration
+            };
+          }
+
+          await sleep(500);
+        }
+
+        log(
+          "MP4 did not become ready within 60 seconds"
+        );
+
+        return {
+          video,
+          url: selected.url,
+          duration:
+            Number.isFinite(video.duration)
+              ? video.duration
+              : null
+        };
+      }
+
+      /*
+       * ------------------------------------------------------------
+       * Start playback
+       * ------------------------------------------------------------
+       */
+
+      let result =
+        await installProgressiveSource();
+
+      let video =
+        result && result.video
+          ? result.video
+          : await waitForVideo();
+
+      if (!video) {
+        log(
+          "ERROR: Vimeo video element not found"
+        );
+
+        return;
+      }
+
+      video.muted = true;
+      video.setAttribute(
+        "playsinline",
+        ""
+      );
+
+      let playing = false;
+
+      for (
+        let attempt = 0;
+        attempt < 20;
+        attempt++
+      ) {
+        video = getVideo();
+
+        if (!video) {
+          await sleep(500);
+          continue;
+        }
+
         try {
           await video.play();
 
           if (!video.paused) {
-            log("video.play() succeeded");
             playing = true;
             break;
           }
+
         } catch (err) {
           log(
-            `video.play() rejected: ${
-              err.message || err
+            `play() attempt ${attempt + 1} failed: ${
+              err && err.message
+                ? err.message
+                : err
             }`
           );
-        }
-
-        /*
-         * Try visible Vimeo Play controls.
-         */
-        const buttons = getPlayButtons();
-
-        for (const button of buttons) {
-          log(
-            `Clicking Vimeo Play control`
-          );
-
-          clickElement(button);
-
-          await sleep(1000);
-
-          video = getVideo();
-
-          if (video && !video.paused) {
-            log(
-              "Vimeo started after Play button click"
-            );
-
-            playing = true;
-            break;
-          }
-        }
-
-        if (playing) {
-          break;
         }
 
         await sleep(1000);
       }
 
-    if (!playing) {
-  log(
-    "ERROR: unable to start Vimeo playback"
-  );
-
-  /*
-   * Give Vimeo another chance to initialise.
-   */
-  await sleep(5000);
-
-  video = getVideo();
-
-  if (video) {
-    try {
-      video.muted = true;
-      await video.play();
-    } catch (err) {
       log(
-        `Retry play() rejected: ${
-          err.message || err
-        }`
+        playing
+          ? "Progressive MP4 playback started"
+          : "WARNING: playback did not start"
       );
-    }
-  }
-
-  if (!video || video.paused) {
-    const buttons = getPlayButtons();
-
-    for (const button of buttons) {
-      clickElement(button);
-      await sleep(2000);
-
-      video = getVideo();
-
-      if (video && !video.paused) {
-        playing = true;
-        log("Vimeo started after retry");
-        break;
-      }
-    }
-  }
-}
 
       /*
-       * ----------------------------------------------------------
-       * MONITOR PLAYBACK
-       * ----------------------------------------------------------
-       *
-       * 15-minute safety limit.
+       * ------------------------------------------------------------
+       * Keep playback alive and detect Vimeo replacing our source
+       * ------------------------------------------------------------
        */
 
-      let lastTime = video.currentTime;
+      const startTime =
+        Date.now();
+
+      let previousTime = -1;
       let stalledFor = 0;
 
-      for (let i = 0; i < 180; i++) {
-        await sleep(5000);
+      while (
+        Date.now() - startTime <
+        MAX_RUNTIME
+      ) {
+        await sleep(2000);
 
         video = getVideo();
 
         if (!video) {
           log(
-            "Video element disappeared; waiting for replacement"
+            "Vimeo replaced the video element"
           );
+
+          /*
+           * Give Vimeo time to recreate it, then reinstall MP4.
+           */
+
+          await sleep(1000);
+
+          if (result && result.url) {
+            const replacement =
+              await waitForVideo(10000);
+
+            if (replacement) {
+              try {
+                replacement.pause();
+
+                replacement.src =
+                  result.url;
+
+                replacement.preload =
+                  "auto";
+
+                replacement.muted =
+                  true;
+
+                replacement.load();
+
+                await replacement.play();
+
+                video =
+                  replacement;
+
+                log(
+                  "Restored progressive MP4 after video replacement"
+                );
+
+              } catch (err) {
+                log(
+                  `Could not restore MP4: ${
+                    err && err.message
+                      ? err.message
+                      : err
+                  }`
+                );
+              }
+            }
+          }
 
           continue;
         }
 
         const currentTime =
-          video.currentTime;
+          Number(video.currentTime) || 0;
 
         const duration =
           Number.isFinite(video.duration)
@@ -331,111 +539,177 @@ class ECAVimeoAll {
             : null;
 
         log(
-          `video state: ` +
-          `time=${currentTime.toFixed(2)} ` +
-          `duration=${
+          `Playback: ${currentTime.toFixed(1)}s` +
+          (
             duration !== null
-              ? duration.toFixed(2)
-              : "unknown"
-          } ` +
-          `paused=${video.paused} ` +
-          `ended=${video.ended} ` +
-          `readyState=${video.readyState}`
+              ? ` / ${duration.toFixed(1)}s`
+              : ""
+          ) +
+          ` paused=${video.paused}` +
+          ` readyState=${video.readyState}`
         );
 
         /*
-         * Finished.
+         * Completed.
          */
-        if (video.ended) {
+
+        if (
+          video.ended ||
+          (
+            duration !== null &&
+            currentTime >= duration - 0.5
+          )
+        ) {
           log(
-            "Vimeo video finished"
+            "Vimeo MP4 reached the end"
           );
+
+          /*
+           * Keep the page alive briefly after the end. This gives
+           * Browsertrix time to finish outstanding media requests.
+           */
+
+          await sleep(5000);
 
           return;
         }
 
         /*
-         * Detect movement.
+         * Detect stalled playback.
          */
-        if (currentTime > lastTime + 0.2) {
-          stalledFor = 0;
-        } else {
-          stalledFor += 5;
-        }
 
-        lastTime = currentTime;
-
-        /*
-         * Vimeo paused.
-         */
-        if (video.paused) {
-          log(
-            "Vimeo paused — attempting resume"
-          );
-
-          try {
-            await video.play();
-          } catch (_) {}
-
-          await sleep(500);
-
-          if (video.paused) {
-            const buttons =
-              getPlayButtons();
-
-            for (const button of buttons) {
-              clickElement(button);
-
-              await sleep(500);
-
-              if (!video.paused) {
-                break;
-              }
-            }
-          }
-        }
-
-        /*
-         * Vimeo hasn't advanced for 10 seconds.
-         */
         if (
-          stalledFor >= 10 &&
-          !video.ended
+          previousTime >= 0 &&
+          currentTime <=
+            previousTime + 0.05
+        ) {
+          stalledFor += 2;
+        } else {
+          stalledFor = 0;
+        }
+
+        previousTime =
+          currentTime;
+
+        /*
+         * Recovery.
+         */
+
+        if (
+          video.paused ||
+          stalledFor >= 20
         ) {
           log(
-            "Playback stalled — attempting recovery"
+            `Playback recovery: stalled=${stalledFor}s`
           );
 
           try {
             await video.play();
           } catch (_) {}
 
-          if (video.paused) {
-            const buttons =
-              getPlayButtons();
+          if (
+            video.paused &&
+            result &&
+            result.url
+          ) {
+            try {
+              /*
+               * Re-installing the same MP4 is more reliable than
+               * allowing Vimeo to fall back to MSE.
+               */
 
-            for (const button of buttons) {
-              clickElement(button);
+              const position =
+                video.currentTime || 0;
 
-              await sleep(500);
+              video.src =
+                result.url;
 
-              if (!video.paused) {
-                break;
-              }
+              video.load();
+
+              /*
+               * Do not always restart at zero after a transient
+               * failure.
+               */
+
+              try {
+                video.currentTime =
+                  position;
+              } catch (_) {}
+
+              await video.play();
+
+              log(
+                `Restarted MP4 at ${position.toFixed(1)}s`
+              );
+
+            } catch (err) {
+              log(
+                `MP4 recovery failed: ${
+                  err && err.message
+                    ? err.message
+                    : err
+                }`
+              );
             }
           }
 
           stalledFor = 0;
+        }
+
+        /*
+         * If Vimeo has silently switched us back to an MSE source,
+         * put the progressive MP4 back.
+         */
+
+        if (
+          result &&
+          result.url &&
+          video.currentSrc &&
+          video.currentSrc !== result.url
+        ) {
+          log(
+            `Vimeo changed currentSrc to ${video.currentSrc}`
+          );
+
+          try {
+            const position =
+              video.currentTime || 0;
+
+            video.src =
+              result.url;
+
+            video.load();
+
+            try {
+              video.currentTime =
+                position;
+            } catch (_) {}
+
+            await video.play();
+
+            log(
+              "Restored progressive MP4 source"
+            );
+
+          } catch (err) {
+            log(
+              `Could not restore MP4 source: ${
+                err && err.message
+                  ? err.message
+                  : err
+              }`
+            );
+          }
         }
 
         yield {
           msg:
-            `Vimeo playback ${currentTime.toFixed(1)}s`
+            `Vimeo MP4 playback ${currentTime.toFixed(1)}s`
         };
       }
 
       log(
-        "Reached Vimeo 15-minute safety limit"
+        "Reached 30-minute Vimeo safety limit"
       );
 
       return;
@@ -448,130 +722,155 @@ class ECAVimeoAll {
      */
 
     log(
-      `Running on ECA portfolio page: ${window.location.pathname}`
+      `Running ECA page: ${location.href}`
     );
 
     /*
-     * Find ECA video thumbnails.
+     * The ECA site appears to create the Vimeo player after the
+     * visitor activates the media thumbnail. Find both the image
+     * and its clickable container.
      */
 
     const selectors = [
+      ".video-image-container",
       ".video-image-container img",
+      "[class*='video-image']",
       "[class*='video-image'] img",
-      "[data-vimeo] img",
-      "[data-vimeo-id] img",
-      "[data-video] img",
-      "[data-video-id] img"
+      "[data-vimeo]",
+      "[data-vimeo-id]",
+      "[data-video]",
+      "[data-video-id]"
     ];
 
-    const thumbnails = [];
+    const elements = [];
 
     for (const selector of selectors) {
       for (
         const el of document.querySelectorAll(selector)
       ) {
-        const rect =
-          el.getBoundingClientRect();
-
-        if (
-          rect.width >= 100 &&
-          rect.height >= 50 &&
-          !thumbnails.includes(el)
-        ) {
-          thumbnails.push(el);
+        if (!elements.includes(el)) {
+          elements.push(el);
         }
       }
     }
 
-    log(
-      `Found ${thumbnails.length} possible video thumbnail(s)`
-    );
+    /*
+     * Turn thumbnails into their actual clickable element.
+     */
 
-    if (!thumbnails.length) {
-      return;
+    const targets = [];
+
+    for (const el of elements) {
+      const target =
+        el.closest(
+          "a, button, [role='button'], .video-image-container"
+        ) || el;
+
+      if (
+        !targets.includes(target)
+      ) {
+        targets.push(target);
+      }
     }
 
+    log(
+      `Found ${targets.length} possible video targets`
+    );
+
     /*
-     * ----------------------------------------------------------
-     * PROCESS THUMBNAILS
-     * ----------------------------------------------------------
+     * Also account for Vimeo frames that are already present.
+     */
+
+    const existingFrames =
+      document.querySelectorAll(
+        "iframe[src*='player.vimeo.com']"
+      );
+
+    log(
+      `Existing Vimeo frames: ${existingFrames.length}`
+    );
+
+    /*
+     * Activate every video.
      */
 
     for (
-      let index = 0;
-      index < thumbnails.length;
-      index++
+      let i = 0;
+      i < targets.length;
+      i++
     ) {
-      const thumbnail = thumbnails[index];
-
-      log(
-        `Processing video ${index + 1}/${thumbnails.length}`
-      );
+      const target =
+        targets[i];
 
       try {
-        thumbnail.scrollIntoView({
+        target.scrollIntoView({
           block: "center",
           inline: "center"
         });
       } catch (_) {}
 
-      await sleep(500);
-
-      /*
-       * FIRST CLICK:
-       *
-       * ECA thumbnail → /media/oembed
-       */
+      await sleep(1000);
 
       try {
-        thumbnail.click();
+        target.click();
 
         log(
-          "Clicked ECA video thumbnail"
+          `Clicked ECA video ${i + 1}/${targets.length}`
         );
+
       } catch (err) {
         log(
-          `Thumbnail click failed: ${
-            err.message || err
+          `Could not click video ${i + 1}: ${
+            err && err.message
+              ? err.message
+              : err
           }`
         );
 
         continue;
-/*
-       * --------------------------------------------------------
-       * GIVE THE VIMEO PLAYER TIME TO RUN
-       * --------------------------------------------------------
-       *
-       * The Vimeo iframe behaviour is responsible for starting
-       * and monitoring playback. Do not immediately move on to
-       * the next thumbnail.
-       *
-       * Allow enough time for Vimeo to request media segments.
+      }
+
+      yield {
+        msg:
+          `Activated ECA video ${i + 1}/${targets.length}`
+      };
+
+      /*
+       * Don't immediately click the next video. The Vimeo iframe
+       * needs time to initialise and request its config.
        */
-      log(
-        `Waiting for Vimeo video ${index + 1} to play`
-      );
 
-      await sleep(60000);
+      await sleep(5000);
+    }
+
+    /*
+     * Keep the portfolio page alive for late-created iframes.
+     */
+
+    for (
+      let i = 0;
+      i < 30;
+      i++
+    ) {
+      await sleep(1000);
+
+      const frames =
+        document.querySelectorAll(
+          "iframe[src*='player.vimeo.com']"
+        );
 
       log(
-        `Finished waiting for Vimeo video ${index + 1}`
+        `Vimeo frames currently present: ${frames.length}`
       );
 
       yield {
         msg:
-          `Finished activating video ${index + 1}/${thumbnails.length}`
+          `Waiting for Vimeo media (${i + 1}/30)`
       };
-          };
     }
 
     log(
-      `Finished processing ${thumbnails.length} video(s)`
+      "ECA Vimeo behaviour completed"
     );
-
-    yield {
-      msg:
-        `Processed ${thumbnails.length} ECA video(s)`
-    };
   }
 }
