@@ -255,11 +255,48 @@ class ECAVimeoAll {
         await sleep(1000);
       }
 
-      if (!playing) {
-        log(
-          "WARNING: unable to start Vimeo playback"
-        );
+    if (!playing) {
+  log(
+    "ERROR: unable to start Vimeo playback"
+  );
+
+  /*
+   * Give Vimeo another chance to initialise.
+   */
+  await sleep(5000);
+
+  video = getVideo();
+
+  if (video) {
+    try {
+      video.muted = true;
+      await video.play();
+    } catch (err) {
+      log(
+        `Retry play() rejected: ${
+          err.message || err
+        }`
+      );
+    }
+  }
+
+  if (!video || video.paused) {
+    const buttons = getPlayButtons();
+
+    for (const button of buttons) {
+      clickElement(button);
+      await sleep(2000);
+
+      video = getVideo();
+
+      if (video && !video.paused) {
+        playing = true;
+        log("Vimeo started after retry");
+        break;
       }
+    }
+  }
+}
 
       /*
        * ----------------------------------------------------------
@@ -500,42 +537,32 @@ class ECAVimeoAll {
         );
 
         continue;
-      }
-
-      yield {
-        msg:
-          `Clicked video ${index + 1}/${thumbnails.length}`
-      };
-
-      /*
+/*
        * --------------------------------------------------------
-       * IMPORTANT:
-       *
-       * Do NOT try to discover the Vimeo iframe here.
-       *
-       * Browsertrix's runInIframe mechanism is already detecting
-       * and executing this behavior inside the Vimeo iframe.
-       *
-       * We simply give the iframe time to initialise and play.
+       * GIVE THE VIMEO PLAYER TIME TO RUN
        * --------------------------------------------------------
+       *
+       * The Vimeo iframe behaviour is responsible for starting
+       * and monitoring playback. Do not immediately move on to
+       * the next thumbnail.
+       *
+       * Allow enough time for Vimeo to request media segments.
        */
-
-      await sleep(10000);
-
       log(
-        `Allowing Vimeo video ${index + 1} time to initialise`
+        `Waiting for Vimeo video ${index + 1} to play`
       );
 
-      /*
-       * If the page has multiple videos, allow the current
-       * iframe to continue operating before opening the next.
-       */
-      await sleep(5000);
+      await sleep(60000);
+
+      log(
+        `Finished waiting for Vimeo video ${index + 1}`
+      );
 
       yield {
         msg:
           `Finished activating video ${index + 1}/${thumbnails.length}`
       };
+          };
     }
 
     log(
