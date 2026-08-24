@@ -724,6 +724,12 @@ class ECAVimeoArchive {
     log(
       `Running ECA page: ${location.href}`
     );
+    log(
+      "VIMEO SEARCH TEST: " +
+      document.documentElement.outerHTML.match(
+    /(?:player\.)?vimeo\.com[^"' <]*/gi
+  )
+);
 
     /*
      * The ECA site appears to create the Vimeo player after the
